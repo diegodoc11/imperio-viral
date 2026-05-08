@@ -1,0 +1,22 @@
+// Recalcula el heat relativo al hashtag para todos los hashtags ya scrapeados.
+// Útil tras cambiar la fórmula o tras la migración inicial.
+
+import "dotenv/config";
+import { initSchema } from "../lib/db";
+import { recomputeAllHashtagHeat } from "../lib/hashtag-heat";
+
+function main() {
+  initSchema();
+  const results = recomputeAllHashtagHeat();
+  console.log(`\nRecomputado para ${results.length} hashtag(s):\n`);
+  for (const r of results) {
+    const types = Object.entries(r.byType)
+      .filter(([, v]) => v.median != null)
+      .map(([t, v]) => `${t}: ${v.tagged} tagged (mediana=${v.median!.toFixed(0)})`)
+      .join("  |  ");
+    console.log(`  #${r.hashtag}: ${types || "(sin datos)"}`);
+  }
+  console.log();
+}
+
+main();
