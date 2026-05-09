@@ -16,6 +16,8 @@
     "recompute-hashtag-heat": "tsx scripts/recompute-hashtag-heat.ts",
     "analyze-er": "tsx scripts/analyze-er.ts",
     "refresh-language": "tsx scripts/refresh-language.ts",
+    "diagnose-scrape": "tsx scripts/diagnose-scrape.ts",
+    "diagnose-apify-run": "tsx scripts/diagnose-apify-run.ts",
     "dev": "next dev",
     "build": "next build",
     "start": "next start"

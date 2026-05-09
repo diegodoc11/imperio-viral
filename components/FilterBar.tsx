@@ -50,10 +50,8 @@ const SORTS = [
   { value: "viewsPerFollower", label: "🚀 Joyas ocultas (views/followers)" },
   { value: "viralidadMultiplier", label: "Viralidad vs perfil (mult.)" },
   { value: "engagementRate", label: "Engagement %" },
-  { value: "engagementScore", label: "Engagement absoluto" },
   { value: "viralVelocity", label: "Velocidad viral (views/h)" },
   { value: "videoViewCount", label: "Más vistas (solo reels)" },
-  { value: "postedAt", label: "Más recientes" },
 ];
 
 const DECISIONS = [

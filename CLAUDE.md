@@ -50,6 +50,8 @@ npm run peek:profile -- [--user=X] [--recent=7]
 npm run dump-raw -- --type=Video [--idx=N]           # JSON crudo de un item
 npm run analyze-er -- --id=X | --short=Y             # auditoría de ER de un post
 npm run diagnose-post -- --id=X                      # explica por qué un post no tiene clasificación
+npm run diagnose-scrape -- [--limit=N]               # últimos scrape runs con stats
+npm run diagnose-apify-run -- --runId=X              # detalle de un Apify run (lo que vino vs lo en DB)
 npm run inspect-actor -- [--actor=apify/instagram-scraper]
 ```
 
@@ -205,6 +207,16 @@ actualiza sola.
   `GET https://api.apify.com/v2/actor-builds/{buildId}?token=...`
 - `client.actor(id).get()` sí existe pero `exampleRunInput.body` es
   basura (suele ser `"{ \"helloWorld\": 123 }"`).
+
+### `resultsLimit` es máximo, NO garantía
+
+Si pides `resultsLimit: 50` y el feed reciente del hashtag solo tiene 30
+items, Apify devuelve 30 y termina exitosamente. **No es bug — el hashtag
+simplemente no es lo suficientemente activo en ese tipo de contenido.**
+Hashtags pequeños/de nicho (`#negociosconia`, `#anunciosconia`) suelen
+devolver 20-35. Hashtags grandes (`#trafegopago`, `#aimarketing`) sí
+llegan a 50+. Ver `scripts/diagnose-apify-run.ts` para confirmar el dato
+real del run.
 
 ### Apify NO permite "skip these IDs"
 
@@ -460,8 +472,12 @@ hindi y francés mezclados. Distinguir explícitamente:
 | 3.2 | ✅ | Heat para no-reels (relativo al hashtag) + view rate |
 | 3.3 | ✅ | Enriquecimiento de followers (joyas ocultas) |
 | 3.4 | ✅ | Warning de duplicados al re-scrapear hashtag |
+| 3.5 | ✅ | Heat para no-reels relativo al hashtag, simplificación de sorts (6 opciones) |
+| - | open | **Punto de revisión del plan** — usuario quiere refinar siguientes pasos tras ver la app funcionando |
 | 6 | pending | Transcripción Whisper + anatomía del guión |
 | 7 | pending | Análisis visual con Gemini |
+| 8 | pending | Generación de deliverables (hooks/scripts) con Claude Haiku |
+| 9 | pending | Multi-tenant con login (cuando se vaya a clientes) |
 
 ## Cosas que NO hacer
 
