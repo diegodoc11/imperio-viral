@@ -19,11 +19,48 @@ Multi-niche desde el día 1 (cualquier vertical, cualquier cliente). Pipeline:
 - **PostgreSQL** vía **Supabase** (managed, free tier alcanza para empezar).
   Conectado por el **Transaction pooler** porque la conexión directa de Supabase
   es IPv6-only y casi ninguna red residencial latinoamericana tiene IPv6.
+- **Supabase Storage** para thumbnails de posts (las URLs de IG CDN caducan
+  en horas — guardamos copia propia al scrape). 1 GB gratis = ~17k posts.
 - **`pg`** (node-postgres) con `Pool` para conexiones. Reemplazó `node:sqlite`
   cuando movimos a multi-tenant — escala a Pueblo + permite RLS.
+- **`@supabase/supabase-js`** para upload a Storage (usa service_role_key).
 - **`apify-client`** oficial.
 - **`tsx`** para ejecutar scripts TypeScript directamente.
 - **Tailwind 3** para estilos.
+
+## Modalidades de despliegue
+
+Hay dos formas de correr la app, según el caso de uso. Eligen distintas
+fuentes de verdad para datos e imágenes y tienen trade-offs claros.
+
+### Modo equipo (cloud-shared — el actual)
+
+Tú y tu equipo apuntan a la misma instancia de Supabase. La DB y los
+thumbnails están compartidos en cloud → si A scrapea, B ve los resultados
+inmediatamente, imágenes incluidas. Es lo que ya está implementado.
+
+- **DB**: Supabase Postgres (free tier 500 MB)
+- **Thumbnails**: Supabase Storage (free tier 1 GB)
+- **Video preview**: ❌ no — solo iframe de IG en detail page
+- **Costo**: $0 hasta llenar storage; después $25/mes Pro (100 GB)
+- **Pros**: colaboración real, datos sincronizados, escalable
+- **Cons**: sin video preview en grid (subir MP4 explotaría el GB rápido)
+
+### Modo alumno (local-standalone — roadmap)
+
+Cada alumno corre TODO en su máquina: DB (Postgres local o SQLite),
+thumbnails en disco local, y **video preview de 5s** generados con ffmpeg
+también en disco local. No usan Supabase. No comparten datos.
+
+- **DB**: a definir (Postgres local, SQLite, o Supabase free propio)
+- **Thumbnails**: `data/thumbnails/<id>.jpg` (filesystem local)
+- **Video preview**: `data/video-previews/<id>.mp4` (5s, 320p, ~250 KB)
+- **Costo**: $0 — alumno usa su propio disco
+- **Pros**: video preview SÍ funciona, gratis para siempre, autónomo
+- **Cons**: cada alumno aislado, no comparte hallazgos, requiere ffmpeg
+
+**Cuándo elegir cuál**: si trabajas solo → modo alumno (mejor UX). Si
+trabajas en equipo y necesitan compartir → modo equipo (sin video preview).
 
 ## Setup local (para nuevos instaladores)
 
@@ -53,17 +90,30 @@ supabase db push       # aplica todo lo que esté en supabase/migrations/
 #    INSERT INTO niches (workspace_id, name, slug)
 #    VALUES ('<workspace-uuid>', 'General', 'general') RETURNING id;
 
-# 6. Crear .env (ver .env.example):
+# 6. Crear bucket de Storage para thumbnails (modo equipo):
+#    a) Desde el dashboard: Storage → New bucket
+#       - Name: post-thumbnails
+#       - Public: ✅ activar
+#    b) O via SQL:
+#       npx tsx scripts/create-storage-bucket.ts
+
+# 7. Crear .env (ver .env.example):
 #    APIFY_TOKEN=apify_api_...
 #    OPENAI_API_KEY=sk-proj-...        (opcional, solo para transcripción)
 #    ANTHROPIC_API_KEY=sk-ant-api03-... (opcional, solo para adaptación)
 #    DATABASE_URL=postgresql://postgres.<ref>:<password>@aws-1-us-east-1.pooler.supabase.com:6543/postgres
 #    DEFAULT_WORKSPACE_ID=<workspace-uuid del paso 5>
+#    SUPABASE_URL=https://<ref>.supabase.co
+#    SUPABASE_SERVICE_ROLE_KEY=eyJ... (Settings → API → service_role secret)
 
-# 7. Correr
+# 8. Correr
 npm run build && npm start    # modo producción (rápido)
 # o
 npm run dev                    # modo dev con hot-reload (lento, 3-5× más lento)
+# o (Windows, doble-click)
+"Imperio Viral.bat"            # arranque automatizado con browser
+# o (Mac, doble-click)
+bash start-mac.sh              # arranque automatizado con instalación de Node si falta
 ```
 
 ⚠️ **El password del DATABASE_URL debe estar URL-encoded**: `*` → `%2A`, `@` → `%40`,
@@ -287,18 +337,46 @@ que estima % de overlap según días desde el último scrape.
 
 ## Imágenes y videos — IG es hostil con embedders externos
 
-### Image proxy (`/api/img`) — esencial
+### Thumbnails — Supabase Storage (modo equipo) — ESENCIAL
 
-Las URLs del CDN de Instagram (`*.cdninstagram.com`, `*.fbcdn.net`) están
-firmadas para el navegador del owner del post y devuelven 403 al pedirlas
-desde otro browser por política de referer.
+**Las URLs del CDN de IG (`*.cdninstagram.com`, `*.fbcdn.net`) NO duran**.
+Caducan en ~24 horas para cualquier origen distinto del scraper original
+(devuelven 403). Eso aplica incluso desde nuestro proxy server-side. Por
+eso una app que mostraba todas las imágenes el día del scrape, a los 2-3
+días se ve "sin imágenes" para los posts viejos.
 
-**Solución**: proxy server-side en `app/api/img/route.ts`. Recibe `?url=...`,
-valida que el host sea de IG, descarga del lado servidor, retransmite con
-cache-control 24h.
+**Solución (verificada)**: al scrapear, mientras la URL todavía es válida,
+descargamos el thumbnail (~30-100 KB JPG) y lo subimos a Supabase Storage
+en un bucket público `post-thumbnails`. Después servimos la URL pública
+de Storage directamente — no caduca, no hay firma, no requiere proxy.
+
+**Flujo concreto**:
+
+1. `lib/persist.ts:upsertPosts()` descarga thumbnails con concurrencia 5
+   ANTES de insertar. Si la descarga falla (403), `thumbnail_storage_path`
+   queda null y el post se inserta igual.
+2. Columna `posts.thumbnail_storage_path` guarda `<post_id>.jpg`.
+3. `lib/supabase-storage.ts:downloadAndStoreImage()` hace el GET+upload.
+4. `lib/queries.ts:rowToPost()` prefiere la URL pública de Storage cuando
+   existe; si no, cae a `display_url` original (probablemente caducada).
+5. `lib/img.ts:imgProxy()` distingue por hostname — URLs de Supabase
+   pasan directas; URLs de IG van al proxy `/api/img`.
+
+**El bucket DEBE ser público** (`storage.buckets.public = true`). Si está
+privado, el navegador no puede leer las imágenes sin auth.
+
+**Costo**: 1 GB del free tier = ~17.000 thumbnails. Cuando se llene, Plan
+Pro ($25/mes) escala a 100 GB. No requiere migración, solo upgrade.
+
+### Image proxy (`/api/img`) — fallback para imágenes no migradas
+
+Solo se usa para posts viejos que aún no tienen `thumbnail_storage_path`
+poblado. Su utilidad real bajó mucho desde que IG endureció las firmas:
+hoy el proxy devuelve 403 para casi cualquier URL más vieja que 24 horas.
+**Antes era esencial, hoy es legacy fallback.**
 
 Helper: `imgProxy(url)` en `lib/img.ts`. **TODOS los `<img>` deben pasar
-por ahí.**
+por ahí** — internamente decide si proxear o pasar tal cual.
 
 ### Videos: NO son reproducibles desde el browser, jamás
 
@@ -580,16 +658,17 @@ Solo si `transcription.language !== "es"`. Si ya está en español, omitimos.
 │   ├── apify.ts                # cliente, runHashtagScrape, runProfileScrape, runProfileDetailsScrape, runPostScrape
 │   ├── baseline.ts             # recomputeProfileBaseline (mediana + 5 tiers)
 │   ├── db.ts                   # pg pool, query(), queryOne(), withTransaction(), getWorkspaceId()
-│   ├── niches.ts               # nicho activo desde cookie, listNiches, createNiche, getActiveNicheId
+│   ├── niches.ts               # nicho activo desde cookie (con fallback CLI), listNiches, createNiche
 │   ├── enrichment.ts           # joyas ocultas
 │   ├── hashtag-heat.ts         # heat relativo a la mediana del hashtag
-│   ├── img.ts                  # imgProxy()
+│   ├── img.ts                  # imgProxy() — distingue por hostname si proxear o pasar directo
+│   ├── supabase-storage.ts     # client de Supabase Storage, downloadAndStoreImage, publicUrlFor
 │   ├── apify-usage.ts          # consumo del plan
 │   ├── jobs.ts                 # tracking de jobs async
 │   ├── language.ts             # inferLanguage
-│   ├── persist.ts              # normalize, upsertPosts, upsertProfile, recordScrapeRun
+│   ├── persist.ts              # normalize, upsertPosts (con descarga de thumbnails), upsertProfile, recordScrapeRun
 │   ├── pricing.ts              # APIFY_*_COST + estimateCost
-│   ├── queries.ts              # PostFilters, queryPosts (paginated), getAllProfiles, getGlobalStats, ...
+│   ├── queries.ts              # PostFilters, queryPosts (prefiere URL de Storage), getAllProfiles, getGlobalStats, ...
 │   ├── score.ts                # computeScores
 │   ├── scrape-actions.ts       # scrapeProfile, scrapeHashtag
 │   ├── transcription.ts        # transcribePost (gpt-4o-transcribe)
@@ -631,10 +710,14 @@ Solo si `transcription.language !== "es"`. Si ya está en español, omitimos.
 | 5 | ✅ | Embed de IG para videos (los signed URLs no son reproducibles desde browser) |
 | 6.0 | ✅ | Transcripción on-demand con gpt-4o-transcribe |
 | 6.1 | ✅ | Adaptación al español + anatomía con Claude Sonnet 4.6 |
+| 6.2 | ✅ | Thumbnails en Supabase Storage (las URLs de IG caducan en 24h) |
+| 6.3 | ✅ | Scripts de arranque automatizados (start-mac.sh, Imperio Viral.bat) |
+| 6.4 | ✅ | Fix: `cookies()` ya no rompe scripts CLI fuera de request scope |
 | 7 | pending | Análisis visual con Gemini |
 | 8 | pending | Generación de deliverables (hooks/scripts) con Haiku |
 | 9 | pending | Supabase Auth + activar RLS (real multi-tenant) |
 | 10 | pending | Deploy a Vercel / Netlify + worker para scrapes largos |
+| 11 | pending | **Modo alumno**: storage 100% local + ffmpeg para video preview |
 
 ## Cosas que NO hacer
 
@@ -655,6 +738,22 @@ Solo si `transcription.language !== "es"`. Si ya está en español, omitimos.
 - **No omitir `keepAlive` y `pool.on("error")`** en el pg Pool. Te llevás "Connection closed".
 - **No usar `force-dynamic`** cuando se puede `revalidate = N`.
 - **No leer cookies en una page que querés cachear** — Next.js la marca dynamic.
+- **No llamar `cookies()` de `next/headers` sin try-catch** en código que pueda
+  correr fuera de request scope. Los scripts CLI (npm run scrape, etc.) no
+  tienen request, y `cookies()` lanza error. Ver `lib/niches.ts:getActiveNiche()`
+  — usa try-catch + fallback al primer nicho del workspace.
+- **No confiar en URLs de CDN de IG** para nada que se vea después de 24h.
+  Caducan, devuelven 403 desde cualquier origen distinto al scraper. Si una
+  imagen importa, descargala al scrape y guardala (Storage o filesystem).
+- **No subir el bucket `post-thumbnails` como privado**. El navegador no puede
+  servir imágenes desde Storage privado sin auth y rompemos el `<img>`.
+- **No hacer scrapes pesados sin tener el bucket de Storage creado primero**.
+  Los thumbnails se descartan silenciosamente, pierdes la ventana de validez
+  de las URLs y los posts viejos quedan sin imagen para siempre.
+- **No filtrar `/_next/static/*` con regex genérico de archivos estáticos**
+  en Nginx (Cloudways lo hace por default). Si deployás detrás de un reverse
+  proxy, usa `location ^~ /_next/` para que gane sobre cualquier regex
+  match de extensiones (`.css`, `.js`, etc.).
 
 ## Seguridad
 
@@ -690,3 +789,19 @@ Solo si `transcription.language !== "es"`. Si ya está en español, omitimos.
 - **Multi-tenant DESDE EL DÍA 1** es más fácil que migrarlo después.
   Un `workspace_id` y un `niche_id` en cada tabla cuestan poco al inicio
   y mucho cuando ya hay 10k posts.
+- **Las URLs firmadas de IG son trampa silenciosa**: el día del scrape
+  funcionan, la semana siguiente no — pero el código sigue corriendo igual,
+  solo que las imágenes salen rotas. Sin un mecanismo de "guardar al scrape"
+  la app se degrada con el tiempo sin avisar. Empirísticamente la ventana
+  es de unas 24 horas, no semanas.
+- **Cloudways está optimizado para PHP/WordPress**, no para apps Node.
+  El reverse proxy hacia tu Next.js requiere bloques explícitos para
+  `/_next/` (con `^~` para ganar sobre regex de extensiones) y para `/api/`.
+  Sin eso: HTML carga, estáticos dan 404, API da 403.
+- **Diagnosticar "se ve sin estilos" en una app Next desplegada**: primero
+  mirar Network DevTools por status codes de los CSS/JS. Si son 404 o 403,
+  el problema es Nginx/CDN delante. Si son 200 pero la página igual se
+  ve mal, es del lado del navegador (caché, extensiones, cookies).
+- **Decidir storage compartido vs local define quién puede colaborar**.
+  Storage local = cada usuario aislado (modo alumno). Storage cloud =
+  colaboración real (modo equipo). No hay middle ground sin sync engine.

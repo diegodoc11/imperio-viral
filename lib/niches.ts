@@ -39,10 +39,20 @@ export async function listNiches(): Promise<Niche[]> {
 // Resuelve el nicho activo desde cookie. Si no hay cookie o slug inválido,
 // devuelve el primer nicho del workspace (más viejo). Si no hay nichos
 // (no debería pasar tras la migración), lanza error.
+//
+// Scripts CLI: cookies() falla fuera de request scope. Caemos al primer
+// nicho del workspace silenciosamente — para CLI siempre operamos sobre
+// el nicho default. Si necesitás un nicho específico en CLI, pasalo como
+// flag al script y armá la lógica ahí.
 export async function getActiveNiche(): Promise<Niche> {
   const wsId = getWorkspaceId();
-  const c = await cookies();
-  const slug = c.get(COOKIE_NAME)?.value;
+  let slug: string | undefined;
+  try {
+    const c = await cookies();
+    slug = c.get(COOKIE_NAME)?.value;
+  } catch {
+    // Fuera de request scope (script CLI). Sin slug → fallback al primer nicho.
+  }
 
   if (slug) {
     const row = await queryOne<any>(

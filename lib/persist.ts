@@ -6,6 +6,7 @@ import { computeScores } from "./score";
 import { inferLanguage } from "./language";
 import { getPool, getWorkspaceId } from "./db";
 import { getActiveNicheId } from "./niches";
+import { downloadAndStoreImage } from "./supabase-storage";
 
 export interface NormalizeOptions {
   sourceHashtag?: string | null;
@@ -99,7 +100,7 @@ INSERT INTO posts (
   likes_count, comments_count, video_view_count, video_play_count, shares_count,
   posted_at, scraped_at, source_hashtag, source_profile, language,
   viral_velocity, engagement_score, engagement_rate, view_rate, viral_score,
-  raw_json
+  raw_json, thumbnail_storage_path
 ) VALUES (
   $1, $2, $3, $4, $5, $6,
   $7, $8, $9,
@@ -109,7 +110,7 @@ INSERT INTO posts (
   $21, $22, $23, $24, $25,
   $26, $27, $28, $29, $30,
   $31, $32, $33, $34, $35,
-  $36
+  $36, $37
 )
 ON CONFLICT (workspace_id, id) DO UPDATE SET
   likes_count       = EXCLUDED.likes_count,
@@ -125,7 +126,8 @@ ON CONFLICT (workspace_id, id) DO UPDATE SET
   engagement_rate   = EXCLUDED.engagement_rate,
   view_rate         = EXCLUDED.view_rate,
   viral_score       = EXCLUDED.viral_score,
-  raw_json          = EXCLUDED.raw_json
+  raw_json          = EXCLUDED.raw_json,
+  thumbnail_storage_path = COALESCE(EXCLUDED.thumbnail_storage_path, posts.thumbnail_storage_path)
 RETURNING (xmax = 0) AS inserted
 `;
 
@@ -135,11 +137,52 @@ export interface UpsertResult {
   failed: number;
 }
 
+// Descarga thumbnails en paralelo con concurrencia limitada. Las URLs de IG
+// caducan en horas — la primera ventana tras el scrape es la única confiable.
+async function downloadThumbnails(
+  posts: StoredPost[]
+): Promise<Map<string, string | null>> {
+  const result = new Map<string, string | null>();
+  const concurrency = 5;
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < posts.length) {
+      const i = cursor++;
+      const p = posts[i];
+      if (!p.displayUrl) {
+        result.set(p.id, null);
+        continue;
+      }
+      const path = await downloadAndStoreImage(p.displayUrl, `${p.id}.jpg`);
+      result.set(p.id, path);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, posts.length) }, () => worker())
+  );
+  return result;
+}
+
 export async function upsertPosts(posts: StoredPost[]): Promise<UpsertResult> {
   if (posts.length === 0) return { inserted: 0, updated: 0, failed: 0 };
   const wsId = getWorkspaceId();
   const nicheId = await getActiveNicheId();
   const pool = getPool();
+
+  // Paso 1: descargar thumbnails ANTES de insertar. Si fallan (URL ya
+  // caduca, rate-limit, etc.) seguimos sin thumbnail — el post se inserta
+  // igual con thumbnail_storage_path = null.
+  console.log(`  → Descargando thumbnails de ${posts.length} posts...`);
+  const t0 = Date.now();
+  const thumbnails = await downloadThumbnails(posts);
+  const ok = Array.from(thumbnails.values()).filter((v) => v !== null).length;
+  console.log(
+    `  ✓ Thumbnails: ${ok}/${posts.length} guardados (${(
+      (Date.now() - t0) / 1000
+    ).toFixed(1)}s)`
+  );
 
   let inserted = 0;
   let updated = 0;
@@ -157,7 +200,7 @@ export async function upsertPosts(posts: StoredPost[]): Promise<UpsertResult> {
         p.likesCount ?? 0, p.commentsCount ?? 0, p.videoViewCount, p.videoPlayCount, p.sharesCount,
         p.postedAt, p.scrapedAt, p.sourceHashtag, p.sourceProfile, p.language,
         p.viralVelocity, p.engagementScore, p.engagementRate, p.viewRate, p.viralScore,
-        p.rawJson,
+        p.rawJson, thumbnails.get(p.id) ?? null,
       ]);
       if (res.rows[0]?.inserted) inserted++;
       else updated++;

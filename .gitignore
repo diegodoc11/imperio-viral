@@ -21,3 +21,12 @@ Thumbs.db
 # Build artifacts
 *.tsbuildinfo
 /tmp/
+
+# Scripts de diagnóstico con credenciales hardcodeadas — NUNCA subir.
+# Se quedan en disco local; el .env (pasado aparte) tiene lo que el equipo necesita.
+scripts/try-passwords.ts
+scripts/test-db-auth.ts
+scripts/inspect-env.ts
+
+# Screenshots sueltos / artefactos de debug
+error4.png

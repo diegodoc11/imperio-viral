@@ -3,6 +3,7 @@
 import { query, queryOne, getWorkspaceId } from "./db";
 import { getActiveNicheId } from "./niches";
 import type { ViralTier, Decision } from "./types";
+import { publicUrlFor } from "./supabase-storage";
 
 const DAY = 86400;
 
@@ -256,6 +257,7 @@ export async function queryPosts(
     SELECT p.id, p.short_code, p.url, p.type,
            p.owner_username, p.owner_full_name,
            p.caption, p.hashtags, p.images, p.display_url, p.video_url,
+           p.thumbnail_storage_path,
            p.likes_count, p.comments_count, p.video_view_count, p.video_play_count,
            p.shares_count, p.video_duration, p.music_artist, p.music_track,
            p.engagement_score, p.engagement_rate, p.view_rate, p.viral_velocity,
@@ -315,6 +317,14 @@ function rowToPost(r: any): PostListItem {
   const images: string[] = Array.isArray(r.images) ? r.images : [];
   const hashtags: string[] = Array.isArray(r.hashtags) ? r.hashtags : [];
 
+  // Si tenemos el thumbnail guardado en Supabase Storage, lo preferimos
+  // a la URL de IG (que caduca en horas). Caemos a display_url para posts
+  // viejos pre-feature, aunque casi nunca cargará por la firma vencida.
+  const displayUrl =
+    r.thumbnail_storage_path != null
+      ? publicUrlFor(r.thumbnail_storage_path)
+      : r.display_url;
+
   return {
     id: r.id,
     shortCode: r.short_code,
@@ -323,7 +333,7 @@ function rowToPost(r: any): PostListItem {
     ownerUsername: r.owner_username,
     ownerFullName: r.owner_full_name,
     caption: r.caption,
-    displayUrl: r.display_url,
+    displayUrl,
     videoUrl: r.video_url,
     images,
     hashtags,
