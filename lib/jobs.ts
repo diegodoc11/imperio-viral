@@ -29,15 +29,19 @@ export async function createJob(
   const wsId = getWorkspaceId();
   const nicheId = await getActiveNicheId();
   const id = randomUUID();
+  // Mismo gotcha jsonb que en finishJob: stringify explícito para que un
+  // array nunca se serialice como literal de array de PG. Hoy todos los
+  // inputs son objetos, pero esto lo blinda a futuro.
+  const inputJson = JSON.stringify(input ?? {});
   await query(
     `INSERT INTO jobs (id, workspace_id, niche_id, type, input, status, message, started_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)`,
     [
       id,
       wsId,
       nicheId,
       type,
-      input ?? {},
+      inputJson,
       "running",
       message ?? null,
       Math.floor(Date.now() / 1000),
@@ -55,17 +59,24 @@ export async function finishJob(
   status: "done" | "failed",
   payload: { result?: any; error?: string; message?: string } = {}
 ): Promise<void> {
+  // ⚠️ `result` va a una columna jsonb. node-pg serializa un ARRAY JS como
+  // literal de array de Postgres (`{...}`), NO como JSON — y eso rompe el
+  // jsonb ("invalid input syntax for type json"). Los scrapes de hashtag y
+  // perfil devuelven result como array → el UPDATE fallaba, lanzaba
+  // unhandledRejection y el job quedaba colgado en "running" para siempre.
+  // Stringify explícito → PG recibe texto y lo castea a jsonb parseándolo.
+  const resultJson = payload.result == null ? null : JSON.stringify(payload.result);
   await query(
     `UPDATE jobs SET
        status      = $1,
-       result      = $2,
+       result      = $2::jsonb,
        error       = $3,
        message     = COALESCE($4, message),
        finished_at = $5
      WHERE id = $6`,
     [
       status,
-      payload.result ?? null,
+      resultJson,
       payload.error ?? null,
       payload.message ?? null,
       Math.floor(Date.now() / 1000),

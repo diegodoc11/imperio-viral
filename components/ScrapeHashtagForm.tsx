@@ -24,6 +24,22 @@ interface TagInfo {
   estimatedOverlapPct: number | null;
 }
 
+// Separa la entrada en hashtags individuales (coma, espacio o salto de línea).
+// Debe coincidir con parseHashtags() del route para que el costo y el conteo
+// que ve el usuario sean los reales.
+function parseTags(raw: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const piece of raw.split(/[\s,]+/)) {
+    const clean = piece.trim().replace(/^#+/, "").toLowerCase();
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      out.push(clean);
+    }
+  }
+  return out;
+}
+
 export function ScrapeHashtagForm() {
   const router = useRouter();
   const [hashtag, setHashtag] = useState("");
@@ -34,15 +50,18 @@ export function ScrapeHashtagForm() {
   const [submitting, setSubmitting] = useState(false);
   const [tagInfo, setTagInfo] = useState<TagInfo | null>(null);
 
-  const cleanTag = hashtag.trim().replace(/^#+/, "").toLowerCase();
+  const tags = parseTags(hashtag);
+  const cleanTag = tags[0] ?? "";
   const typeMeta =
     TYPE_OPTIONS.find((t) => t.value === type) ?? TYPE_OPTIONS[0];
-  const cost = estimateHashtagScrapeCost(limit, typeMeta.count);
+  // El costo escala con la cantidad de hashtags: cada uno es un scrape aparte.
+  const cost = estimateHashtagScrapeCost(limit, typeMeta.count) * Math.max(1, tags.length);
 
   // Debounced fetch del info del hashtag mientras tipea — para warning de
-  // duplicados antes de gastar.
+  // duplicados antes de gastar. Solo aplica cuando hay UN hashtag (con varios
+  // el chequeo de overlap no tiene un único objetivo claro).
   useEffect(() => {
-    if (!cleanTag || cleanTag.length < 2) {
+    if (tags.length !== 1 || cleanTag.length < 2) {
       setTagInfo(null);
       return;
     }
@@ -53,16 +72,18 @@ export function ScrapeHashtagForm() {
         .catch(() => setTagInfo(null));
     }, 400);
     return () => clearTimeout(t);
-  }, [cleanTag]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cleanTag, tags.length]);
 
   async function handleSubmit() {
     setError(null);
-    if (!cleanTag) {
-      setError("Escribe un hashtag");
+    if (tags.length === 0) {
+      setError("Escribe al menos un hashtag");
       return;
     }
 
-    // Warning si re-scrapeo de hashtag con overlap alto previsible.
+    // Warning si re-scrapeo de hashtag con overlap alto previsible (solo
+    // aplica cuando hay un único hashtag).
     if (tagInfo && tagInfo.estimatedOverlapPct != null && tagInfo.estimatedOverlapPct >= 50) {
       const days = tagInfo.daysAgo!.toFixed(1);
       const msg = `Ya tienes ${tagInfo.postsCount} posts de #${cleanTag} (último scrape: hace ${days} días).\n\nEstimación: ~${tagInfo.estimatedOverlapPct}% probablemente serán duplicados (Apify no permite filtrar al scrapear).\n\n¿Continuar y pagar de todas formas?`;
@@ -74,7 +95,7 @@ export function ScrapeHashtagForm() {
       const res = await fetch("/api/scrape/hashtag", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hashtag: cleanTag, limit, type }),
+        body: JSON.stringify({ hashtag: tags.join(","), limit, type }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Error");
@@ -99,6 +120,8 @@ export function ScrapeHashtagForm() {
         <p className="text-xs text-neutral-500">
           Apify devuelve la primera página del feed del hashtag (recientes en
           plan free). Para limitar a N días, después usa el filtro temporal.
+          {" "}Puedes pegar <strong>varios</strong> separados por coma — cada uno
+          se scrapea por separado y el costo se suma.
         </p>
       </header>
 
@@ -185,16 +208,22 @@ export function ScrapeHashtagForm() {
               ~{fmtCost(cost)}
             </div>
             <div className="text-[10px] text-neutral-600">
-              {limit} × {typeMeta.count} × ${APIFY_HASHTAG_COST_PER_ITEM.toFixed(4)}
+              {limit} × {typeMeta.count}
+              {tags.length > 1 ? ` × ${tags.length} tags` : ""} × $
+              {APIFY_HASHTAG_COST_PER_ITEM.toFixed(4)}
             </div>
           </div>
           <button
             type="button"
             onClick={handleSubmit}
-            disabled={submitting || !!jobId || !cleanTag}
+            disabled={submitting || !!jobId || tags.length === 0}
             className="rounded-md bg-purple-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-purple-500 disabled:cursor-not-allowed disabled:bg-neutral-700"
           >
-            {submitting ? "Lanzando…" : `Buscar #${cleanTag || "?"} →`}
+            {submitting
+              ? "Lanzando…"
+              : tags.length > 1
+                ? `Buscar ${tags.length} hashtags →`
+                : `Buscar #${cleanTag || "?"} →`}
           </button>
         </div>
       </div>

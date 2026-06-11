@@ -112,7 +112,7 @@ export function JobStatus({
             <li key={i} className="font-mono">
               {r.error ? (
                 <span className="text-red-400">
-                  ✕ {r.username ?? r.type}: {r.error}
+                  ✕ {r.username ?? (r.hashtag ? `#${r.hashtag} (${r.type})` : r.type)}: {r.error}
                 </span>
               ) : r.username ? (
                 <span>
@@ -132,7 +132,7 @@ export function JobStatus({
                 </span>
               ) : (
                 <span>
-                  {r.type}: {r.received} items,{" "}
+                  {r.hashtag ? `#${r.hashtag} (${r.type})` : r.type}: {r.received} items,{" "}
                   <span className="text-emerald-400">{r.inserted} nuevos</span>
                   {r.updated > 0 && (
                     <span className="text-amber-400">
